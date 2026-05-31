@@ -27,6 +27,7 @@ $CommonMappings = @{
     "visual studio code"          = "vscode"
     "git"                         = "git"
     "github desktop"              = "github-desktop"
+    "go programming language"     = "golang"
     "7-zip"                       = "7zip"
     "vlc media player"            = "vlc"
     "notepad++"                   = "notepadplusplus"
@@ -70,6 +71,8 @@ $CommonMappings = @{
     "whatsapp"                    = "whatsapp"
     "telegram desktop"            = "telegram"
 }
+
+$script:LocalChocoPackages = @{}
 
 # Helper to check if a command exists
 function Test-CommandExists {
@@ -122,6 +125,12 @@ function Get-InstalledApps {
                         continue
                     }
 
+                    # Skip Steam games
+                    $childName = $item.PSChildName
+                    if ($childName -match '^Steam App \d+$' -or $uninstallString -match 'steam://') {
+                        continue
+                    }
+
                     # Clean duplicate additions (same name and version)
                     $isDuplicate = $apps | Where-Object { $_.AppName -eq $displayName -and $_.DisplayVersion -eq $displayVersion }
                     if (-not $isDuplicate) {
@@ -140,6 +149,36 @@ function Get-InstalledApps {
     return $apps
 }
 
+# Helper to check if two strings are similar (prefix match of at least 4 chars or exact match after strip)
+function Test-StringSimilar {
+    param(
+        [string]$str1,
+        [string]$str2
+    )
+    $s1 = $str1.ToLower().Replace("-", "").Replace(".", "").Trim()
+    $s2 = $str2.ToLower().Replace("-", "").Replace(".", "").Trim()
+    
+    # Strip common suffixes/prefixes from both for a fair comparison
+    $cleanS1 = $s1 -replace '(install|portable|app|desktop|client)$', ''
+    $cleanS2 = $s2 -replace '(install|portable|app|desktop|client)$', ''
+    
+    if ($cleanS1 -eq $cleanS2) { return $true }
+    
+    if ($cleanS1.StartsWith($cleanS2) -or $cleanS2.StartsWith($cleanS1)) {
+        $len1 = $cleanS1.Length
+        $len2 = $cleanS2.Length
+        $minLen = [math]::Min($len1, $len2)
+        $maxLen = [math]::Max($len1, $len2)
+        
+        # Enforce that the shorter string must be at least 60% of the longer string
+        # and must have a minimum length of 4 characters to prevent tiny prefix false positives
+        if ($minLen -ge 4 -and ($minLen / $maxLen) -ge 0.60) {
+            return $true
+        }
+    }
+    return $false
+}
+
 # Normalize application name and search for a matching Chocolatey ID
 function Search-ChocoPackage {
     [CmdletBinding()]
@@ -153,23 +192,7 @@ function Search-ChocoPackage {
 
     $lowerName = $AppName.ToLower().Trim()
 
-    # Step 1: Check in the static common mappings list using word boundaries
-    foreach ($key in $CommonMappings.Keys) {
-        $escapedKey = [regex]::Escape($key)
-        # Use word boundaries if it's normal text, otherwise anchor to non-word chars
-        $pattern = if ($key -match '^[a-z0-9\s\-\.]+$') { "\b$escapedKey\b" } else { "\b$escapedKey(?!\w)" }
-        
-        if ($lowerName -match $pattern) {
-            return [PSCustomObject]@{
-                ChocoId    = $CommonMappings[$key]
-                Confidence = "High"
-                Source     = "CommonMappings"
-            }
-        }
-    }
-
-    # Step 2: Normalize the name to clean alphanumeric string for search
-    # Remove version numbers
+    # Step 1: Normalize the name to clean alphanumeric string for search
     $cleanName = $lowerName -replace '\b\d+(\.\d+)+\b', ''
     $cleanName = $cleanName -replace '\b(x64|x86|64-bit|32-bit)\b', ''
     $cleanName = $cleanName -replace '[\(\)\[\]]', ''
@@ -181,6 +204,56 @@ function Search-ChocoPackage {
     $candidateId = $candidateId -replace '[^a-z0-9\-\.]', '' # keep alphanumeric, hyphen, dot
     $candidateId = ($candidateId -replace '-+', '-').Trim('-')
 
+    # Try to generate a second candidate ID by stripping the publisher name
+    $secondCandidateId = $null
+    if (-not [string]::IsNullOrWhiteSpace($Publisher) -and $Publisher -ne "Unknown") {
+        $cleanPub = $Publisher.ToLower() -replace '[^a-z0-9\s]', ''
+        $cleanPub = $cleanPub -replace '\b(corporation|corp|inc|co|ltd|software|systems|technologies|group)\b', ''
+        $cleanPub = ($cleanPub -replace '\s+', ' ').Trim()
+        if (-not [string]::IsNullOrWhiteSpace($cleanPub)) {
+            # Strip publisher from the beginning of clean name if present
+            if ($cleanName.StartsWith($cleanPub)) {
+                $subName = $cleanName.Substring($cleanPub.Length).Trim()
+                $secondCandidateId = $subName -replace '\s+', '-'
+                $secondCandidateId = $secondCandidateId -replace '[^a-z0-9\-\.]', ''
+                $secondCandidateId = ($secondCandidateId -replace '-+', '-').Trim('-')
+            }
+        }
+    }
+
+    # Step 2: Check if candidate IDs are in locally installed Choco packages
+    if ($script:LocalChocoPackages.ContainsKey($candidateId)) {
+        return [PSCustomObject]@{
+            ChocoId    = $candidateId
+            Confidence = "High"
+            Source     = "LocalChocoInstall"
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($secondCandidateId) -and $script:LocalChocoPackages.ContainsKey($secondCandidateId)) {
+        return [PSCustomObject]@{
+            ChocoId    = $secondCandidateId
+            Confidence = "High"
+            Source     = "LocalChocoInstall"
+        }
+    }
+
+    # Step 3: Check in the static common mappings list using word boundaries
+    foreach ($key in $CommonMappings.Keys) {
+        $escapedKey = [regex]::Escape($key)
+        # Use word boundaries if it's normal text, otherwise anchor to non-word chars
+        $pattern = if ($key -match '^[a-z0-9\s\-\.]+$') { "\b$escapedKey\b" } else { "\b$escapedKey(?!\w)" }
+        
+        if ($lowerName -match $pattern) {
+            $mappedId = $CommonMappings[$key]
+            $source = if ($script:LocalChocoPackages.ContainsKey($mappedId)) { "LocalChocoInstall" } else { "CommonMappings" }
+            return [PSCustomObject]@{
+                ChocoId    = $mappedId
+                Confidence = "High"
+                Source     = $source
+            }
+        }
+    }
+
     if ([string]::IsNullOrWhiteSpace($candidateId)) {
         return [PSCustomObject]@{
             ChocoId    = ""
@@ -189,9 +262,9 @@ function Search-ChocoPackage {
         }
     }
 
-    # Step 3: Run choco search if choco is installed
+    # Step 4: Run choco search if choco is installed
     if (Test-CommandExists "choco") {
-        # 3.1 Exact search first
+        # 4.1 Exact search first with candidate ID
         $exactResult = choco search $candidateId -r --exact -y 2>$null
         if (-not [string]::IsNullOrWhiteSpace($exactResult)) {
             $chocoMatch = ($exactResult -split '\|')[0].Trim()
@@ -202,7 +275,20 @@ function Search-ChocoPackage {
             }
         }
 
-        # 3.2 Broad search
+        # 4.2 Exact search with second candidate ID (publisher stripped)
+        if (-not [string]::IsNullOrWhiteSpace($secondCandidateId) -and $secondCandidateId -ne $candidateId) {
+            $exactResultSecond = choco search $secondCandidateId -r --exact -y 2>$null
+            if (-not [string]::IsNullOrWhiteSpace($exactResultSecond)) {
+                $chocoMatch = ($exactResultSecond -split '\|')[0].Trim()
+                return [PSCustomObject]@{
+                    ChocoId    = $chocoMatch
+                    Confidence = "High"
+                    Source     = "ChocoExactSearch"
+                }
+            }
+        }
+
+        # 4.3 Broad search with candidate ID
         $broadResults = choco search $candidateId -r -y 2>$null
         if (-not [string]::IsNullOrWhiteSpace($broadResults)) {
             $lines = $broadResults -split "`r`n" -split "`n"
@@ -211,7 +297,6 @@ function Search-ChocoPackage {
                     $parts = $line -split '\|'
                     $pkgId = $parts[0].Trim()
                     
-                    # Check if the returned package ID matches candidateId or is a close variant
                     if ($pkgId -eq $candidateId -or 
                         $pkgId -eq "$candidateId.install" -or 
                         $pkgId -eq "$candidateId.portable" -or
@@ -228,10 +313,60 @@ function Search-ChocoPackage {
                 }
             }
         }
+
+        # 4.4 Broad search with second candidate ID
+        if (-not [string]::IsNullOrWhiteSpace($secondCandidateId) -and $secondCandidateId -ne $candidateId) {
+            $broadResultsSecond = choco search $secondCandidateId -r -y 2>$null
+            if (-not [string]::IsNullOrWhiteSpace($broadResultsSecond)) {
+                $lines = $broadResultsSecond -split "`r`n" -split "`n"
+                foreach ($line in $lines) {
+                    if (-not [string]::IsNullOrWhiteSpace($line)) {
+                        $parts = $line -split '\|'
+                        $pkgId = $parts[0].Trim()
+                        
+                        if ($pkgId -eq $secondCandidateId -or 
+                            $pkgId -eq "$secondCandidateId.install" -or 
+                            $pkgId -eq "$secondCandidateId.portable" -or
+                            $pkgId -eq "$secondCandidateId-app" -or
+                            $pkgId -eq "$secondCandidateId-desktop" -or
+                            $secondCandidateId -eq "$pkgId-desktop") {
+                            
+                            return [PSCustomObject]@{
+                                ChocoId    = $pkgId
+                                Confidence = "Medium"
+                                Source     = "ChocoBroadSearch"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        # 4.5 Fallback: Try prefix search if candidate ID is at least 5 chars
+        if ($candidateId.Length -ge 5) {
+            $prefixId = $candidateId.Substring(0, 5)
+            $prefixResults = choco search $prefixId -r -y 2>$null
+            if (-not [string]::IsNullOrWhiteSpace($prefixResults)) {
+                $lines = $prefixResults -split "`r`n" -split "`n"
+                foreach ($line in $lines) {
+                    if (-not [string]::IsNullOrWhiteSpace($line)) {
+                        $parts = $line -split '\|'
+                        $pkgId = $parts[0].Trim()
+                        
+                        if (Test-StringSimilar -str1 $candidateId -str2 $pkgId) {
+                            return [PSCustomObject]@{
+                                ChocoId    = $pkgId
+                                Confidence = "Medium"
+                                Source     = "ChocoPrefixSearch"
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    # Step 4: If no search results found, DO NOT GUESS.
-    # Return empty package ID so user can review and fill it manually if desired.
+    # Step 5: If no search results found, DO NOT GUESS.
     return [PSCustomObject]@{
         ChocoId    = ""
         Confidence = "None"
@@ -251,6 +386,23 @@ function Export-MappingCsv {
         
         [switch]$OnlineSearch # Retained as legacy flag, search is now always automated
     )
+
+    # Initialize locally installed Chocolatey packages cache
+    $script:LocalChocoPackages = @{}
+    if (Test-CommandExists "choco") {
+        Write-Host "[*] Querying locally installed Chocolatey packages..." -ForegroundColor Cyan
+        $chocoList = choco list --local-only -r 2>$null
+        if ($chocoList) {
+            foreach ($line in ($chocoList -split "`r`n" -split "`n")) {
+                if (-not [string]::IsNullOrWhiteSpace($line)) {
+                    $parts = $line -split '\|'
+                    $pkgId = $parts[0].Trim().ToLower()
+                    $script:LocalChocoPackages[$pkgId] = $parts[1].Trim()
+                }
+            }
+        }
+        Write-Host "[+] Found $($script:LocalChocoPackages.Count) packages installed via Chocolatey." -ForegroundColor Green
+    }
 
     $existingMappings = @{}
     if (Test-Path $Path) {
@@ -306,11 +458,13 @@ function Export-MappingCsv {
             }
 
             # Interactive logging based on match source
-            if ($match.Confidence -eq "High" -and $match.Source -eq "CommonMappings") {
+            if ($match.Confidence -eq "High" -and $match.Source -eq "LocalChocoInstall") {
+                Write-Host "$prefix [+] Local Choco:  '$($app.AppName)' -> '$($match.ChocoId)'" -ForegroundColor Cyan
+            } elseif ($match.Confidence -eq "High" -and $match.Source -eq "CommonMappings") {
                 Write-Host "$prefix [+] Common Map:  '$($app.AppName)' -> '$($match.ChocoId)'" -ForegroundColor Cyan
             } elseif ($match.Confidence -eq "High" -and $match.Source -eq "ChocoExactSearch") {
                 Write-Host "$prefix [+] Exact Search: '$($app.AppName)' -> '$($match.ChocoId)'" -ForegroundColor Green
-            } elseif ($match.Confidence -eq "Medium" -and $match.Source -eq "ChocoBroadSearch") {
+            } elseif ($match.Confidence -eq "Medium" -and ($match.Source -eq "ChocoBroadSearch" -or $match.Source -eq "ChocoPrefixSearch")) {
                 Write-Host "$prefix [+] Broad Search: '$($app.AppName)' -> '$($match.ChocoId)'" -ForegroundColor Yellow
             } else {
                 Write-Host "$prefix [-] Unresolved:   '$($app.AppName)'" -ForegroundColor DarkGray
