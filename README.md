@@ -19,14 +19,14 @@
 
 ```mermaid
 graph TD
-    A[Run .\choco-align.ps1 -GenerateMap] --> B[Scans Registry & Normalizes Names]
-    B --> C[Heuristic & Online Matching]
-    C --> D[Writes choco-mappings.csv]
-    D --> E[User Reviews / Edits CSV]
-    E --> F[Run .\choco-align.ps1 -GenerateConfig]
-    F --> G[Parses CSV & Filters 'Include' Actions]
-    G --> H[Generates packages.config]
-    H --> I[Run .\choco-align.ps1 -Install [-DryRun]]
+    A["Run .\choco-align.ps1 -GenerateMap"] --> B["Scans Registry & Normalizes Names"]
+    B --> C["Heuristic & Online Matching"]
+    C --> D["Writes choco-mappings.csv"]
+    D --> E["User Reviews / Edits CSV"]
+    E --> F["Run .\choco-align.ps1 -GenerateConfig"]
+    F --> G["Parses CSV & Filters 'Include' Actions"]
+    G --> H["Generates packages.config"]
+    H --> I["Run .\choco-align.ps1 -Install [-DryRun]"]
 ```
 
 ---
