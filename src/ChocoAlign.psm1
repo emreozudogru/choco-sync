@@ -70,6 +70,12 @@ $CommonMappings = @{
     "vmware workstation"          = "vmware-workstation-player"
     "whatsapp"                    = "whatsapp"
     "telegram desktop"            = "telegram"
+    "microsoft office professional plus 2019" = "office2019proplus"
+    "intel® driver & support assistant"      = "intel-dsa"
+    "intel driver & support assistant"       = "intel-dsa"
+    "intelr driver & support assistant"      = "intel-dsa"
+    "burp suite community edition"           = "burp-suite-free-edition"
+    "cursor"                                 = ""
 }
 
 $script:LocalChocoPackages = @{}
@@ -191,11 +197,17 @@ function Search-ChocoPackage {
     )
 
     $lowerName = $AppName.ToLower().Trim()
+    # Strip trademark and registered symbols early to avoid encoding mismatches
+    $lowerName = $lowerName -replace '[®™©]', ''
 
     # Step 1: Normalize the name to clean alphanumeric string for search
-    $cleanName = $lowerName -replace '\b\d+(\.\d+)+\b', ''
-    $cleanName = $cleanName -replace '\b(x64|x86|64-bit|32-bit)\b', ''
-    $cleanName = $cleanName -replace '[\(\)\[\]]', ''
+    # Strip parentheses and brackets along with their contents (helps with (Current user), (Preview), (64-bit), etc.)
+    $cleanName = $lowerName -replace '\([^)]*\)', ''
+    $cleanName = $cleanName -replace '\[[^\]]*\]', ''
+    # Strip versions (including suffixes/plus signs/metadata, e.g. 0.4.14+4, 2.5.1-beta)
+    $cleanName = $cleanName -replace '\b\d+(\.\d+)+([\+\-]\w+)*\b', ''
+    # Strip bitness terms including 64bit/32bit and standalone 64/32
+    $cleanName = $cleanName -replace '\b(x64|x86|64-bit|32-bit|64bit|32bit|64|32)\b', ''
     $cleanName = $cleanName -replace '\b(corporation|inc|co|ltd|software|systems|technologies|group)\b', ''
     $cleanName = $cleanName -replace '\b(version|build|release|client|edition|player)\b', ''
     $cleanName = ($cleanName -replace '\s+', ' ').Trim()
@@ -206,6 +218,7 @@ function Search-ChocoPackage {
 
     # Try to generate a second candidate ID by stripping the publisher name
     $secondCandidateId = $null
+    $cleanPub = "unknown"
     if (-not [string]::IsNullOrWhiteSpace($Publisher) -and $Publisher -ne "Unknown") {
         $cleanPub = $Publisher.ToLower() -replace '[^a-z0-9\s]', ''
         $cleanPub = $cleanPub -replace '\b(corporation|corp|inc|co|ltd|software|systems|technologies|group)\b', ''
@@ -245,6 +258,13 @@ function Search-ChocoPackage {
         
         if ($lowerName -match $pattern) {
             $mappedId = $CommonMappings[$key]
+            if ([string]::IsNullOrWhiteSpace($mappedId)) {
+                return [PSCustomObject]@{
+                    ChocoId    = ""
+                    Confidence = "None"
+                    Source     = "CommonMappings"
+                }
+            }
             $source = if ($script:LocalChocoPackages.ContainsKey($mappedId)) { "LocalChocoInstall" } else { "CommonMappings" }
             return [PSCustomObject]@{
                 ChocoId    = $mappedId
@@ -262,106 +282,91 @@ function Search-ChocoPackage {
         }
     }
 
-    # Step 4: Run choco search if choco is installed
+    # Step 4: Multi-stage search scoring algorithm using choco
     if (Test-CommandExists "choco") {
-        # 4.1 Exact search first with candidate ID
-        $exactResult = choco search $candidateId -r --exact -y 2>$null
-        if (-not [string]::IsNullOrWhiteSpace($exactResult)) {
-            $chocoMatch = ($exactResult -split '\|')[0].Trim()
-            return [PSCustomObject]@{
-                ChocoId    = $chocoMatch
-                Confidence = "High"
-                Source     = "ChocoExactSearch"
-            }
+        # Determine candidate search terms
+        $searchTerms = [System.Collections.Generic.List[string]]::new()
+        
+        # Term 1: The publisher-stripped name if defined (most specific product name)
+        if (-not [string]::IsNullOrWhiteSpace($secondCandidateId)) {
+            $searchTerms.Add($secondCandidateId)
+        }
+        
+        # Term 2: The full candidate ID
+        $searchTerms.Add($candidateId)
+        
+        # Term 3: The first word of the product name (if it is distinct and at least 4 characters long)
+        $cleanProduct = if (-not [string]::IsNullOrWhiteSpace($secondCandidateId)) { $secondCandidateId } else { $candidateId }
+        $firstWord = ($cleanProduct -split '[\-\.]')[0]
+        if ($firstWord.Length -ge 4 -and -not $searchTerms.Contains($firstWord)) {
+            $searchTerms.Add($firstWord)
         }
 
-        # 4.2 Exact search with second candidate ID (publisher stripped)
-        if (-not [string]::IsNullOrWhiteSpace($secondCandidateId) -and $secondCandidateId -ne $candidateId) {
-            $exactResultSecond = choco search $secondCandidateId -r --exact -y 2>$null
-            if (-not [string]::IsNullOrWhiteSpace($exactResultSecond)) {
-                $chocoMatch = ($exactResultSecond -split '\|')[0].Trim()
-                return [PSCustomObject]@{
-                    ChocoId    = $chocoMatch
-                    Confidence = "High"
-                    Source     = "ChocoExactSearch"
-                }
-            }
-        }
+        # Track best scoring package match
+        $bestPkgId = ""
+        $bestScore = 0
+        $bestSource = "Search"
 
-        # 4.3 Broad search with candidate ID
-        $broadResults = choco search $candidateId -r -y 2>$null
-        if (-not [string]::IsNullOrWhiteSpace($broadResults)) {
-            $lines = $broadResults -split "`r`n" -split "`n"
-            foreach ($line in $lines) {
-                if (-not [string]::IsNullOrWhiteSpace($line)) {
-                    $parts = $line -split '\|'
-                    $pkgId = $parts[0].Trim()
-                    
-                    if ($pkgId -eq $candidateId -or 
-                        $pkgId -eq "$candidateId.install" -or 
-                        $pkgId -eq "$candidateId.portable" -or
-                        $pkgId -eq "$candidateId-app" -or
-                        $pkgId -eq "$candidateId-desktop" -or
-                        $candidateId -eq "$pkgId-desktop") {
-                        
-                        return [PSCustomObject]@{
-                            ChocoId    = $pkgId
-                            Confidence = "Medium"
-                            Source     = "ChocoBroadSearch"
-                        }
-                    }
-                }
-            }
-        }
-
-        # 4.4 Broad search with second candidate ID
-        if (-not [string]::IsNullOrWhiteSpace($secondCandidateId) -and $secondCandidateId -ne $candidateId) {
-            $broadResultsSecond = choco search $secondCandidateId -r -y 2>$null
-            if (-not [string]::IsNullOrWhiteSpace($broadResultsSecond)) {
-                $lines = $broadResultsSecond -split "`r`n" -split "`n"
+        foreach ($term in $searchTerms) {
+            $searchResults = choco search $term -r -y 2>$null
+            if (-not [string]::IsNullOrWhiteSpace($searchResults)) {
+                $lines = $searchResults -split "`r`n" -split "`n"
                 foreach ($line in $lines) {
                     if (-not [string]::IsNullOrWhiteSpace($line)) {
                         $parts = $line -split '\|'
                         $pkgId = $parts[0].Trim()
                         
-                        if ($pkgId -eq $secondCandidateId -or 
-                            $pkgId -eq "$secondCandidateId.install" -or 
-                            $pkgId -eq "$secondCandidateId.portable" -or
-                            $pkgId -eq "$secondCandidateId-app" -or
-                            $pkgId -eq "$secondCandidateId-desktop" -or
-                            $secondCandidateId -eq "$pkgId-desktop") {
+                        # Calculate match score
+                        $p = $pkgId.ToLower().Replace("-", "").Replace(".", "").Trim()
+                        $c = $candidateId.ToLower().Replace("-", "").Replace(".", "").Trim()
+                        $score = 0
+                        
+                        if ($p -eq $c) {
+                            $score = 100
+                        } elseif (-not [string]::IsNullOrWhiteSpace($secondCandidateId) -and $p -eq $secondCandidateId.Replace("-", "").Replace(".", "")) {
+                            $score = 90
+                        } elseif ($cleanPub -ne "unknown" -and $p.Contains($cleanPub) -and $p.Contains($firstWord) -and 
+                                  $firstWord -ne $cleanPub -and -not $cleanPub.StartsWith($firstWord) -and -not $firstWord.StartsWith($cleanPub)) {
+                            $score = 80
+                        } elseif (Test-StringSimilar -str1 $pkgId -str2 $candidateId) {
+                            $score = 60
+                        } elseif (-not [string]::IsNullOrWhiteSpace($secondCandidateId) -and (Test-StringSimilar -str1 $pkgId -str2 $secondCandidateId)) {
+                            $score = 50
+                        }
+                        
+                        # Runtimes, frameworks, and visual-c redistributables must match specific keywords
+                        # to prevent them from matching generic dev tools like microsoft-visual-cpp-build-tools
+                        if ($candidateId -match '(redistributable|runtime|framework|visual-c)' -and $score -lt 90) {
+                            if ($pkgId -notmatch '(redist|vcredist|runtime|framework|netfx|dot-net|dotnet)') {
+                                $score = 0
+                            }
+                        }
+                        
+                        if ($score -gt $bestScore) {
+                            $bestScore = $score
+                            $bestPkgId = $pkgId
                             
-                            return [PSCustomObject]@{
-                                ChocoId    = $pkgId
-                                Confidence = "Medium"
-                                Source     = "ChocoBroadSearch"
-                            }
+                            # Map score back to source labels
+                            if ($score -eq 100 -or $score -eq 90) { $bestSource = "ChocoExactSearch" }
+                            elseif ($score -eq 80) { $bestSource = "ChocoExactSearch" } # treat as exact due to double-match
+                            else { $bestSource = "ChocoBroadSearch" }
                         }
                     }
                 }
             }
+            # Only short-circuit if we found a perfect match (Score 100)
+            if ($bestScore -eq 100) {
+                break
+            }
         }
 
-        # 4.5 Fallback: Try prefix search if candidate ID is at least 5 chars
-        if ($candidateId.Length -ge 5) {
-            $prefixId = $candidateId.Substring(0, 5)
-            $prefixResults = choco search $prefixId -r -y 2>$null
-            if (-not [string]::IsNullOrWhiteSpace($prefixResults)) {
-                $lines = $prefixResults -split "`r`n" -split "`n"
-                foreach ($line in $lines) {
-                    if (-not [string]::IsNullOrWhiteSpace($line)) {
-                        $parts = $line -split '\|'
-                        $pkgId = $parts[0].Trim()
-                        
-                        if (Test-StringSimilar -str1 $candidateId -str2 $pkgId) {
-                            return [PSCustomObject]@{
-                                ChocoId    = $pkgId
-                                Confidence = "Medium"
-                                Source     = "ChocoPrefixSearch"
-                            }
-                        }
-                    }
-                }
+        # Return best match if it meets threshold
+        if ($bestScore -ge 50) {
+            $confidence = if ($bestScore -ge 80) { "High" } else { "Medium" }
+            return [PSCustomObject]@{
+                ChocoId    = $bestPkgId
+                Confidence = $confidence
+                Source     = $bestSource
             }
         }
     }
