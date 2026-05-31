@@ -148,9 +148,7 @@ function Search-ChocoPackage {
         [string]$AppName,
         
         [Parameter(Mandatory=$false)]
-        [string]$Publisher = "Unknown",
-        
-        [switch]$OnlineSearch
+        [string]$Publisher = "Unknown"
     )
 
     $lowerName = $AppName.ToLower().Trim()
@@ -170,77 +168,74 @@ function Search-ChocoPackage {
         }
     }
 
-    # Step 2: Normalize the name using heuristic rules
-    # Remove version numbers like 1.0.0, 23.01, etc.
+    # Step 2: Normalize the name to clean alphanumeric string for search
+    # Remove version numbers
     $cleanName = $lowerName -replace '\b\d+(\.\d+)+\b', ''
-    # Remove architecture info (x64, x86, 64-bit, 32-bit)
     $cleanName = $cleanName -replace '\b(x64|x86|64-bit|32-bit)\b', ''
-    # Remove parentheses and brackets
     $cleanName = $cleanName -replace '[\(\)\[\]]', ''
-    # Remove common corporation suffixes
     $cleanName = $cleanName -replace '\b(corporation|inc|co|ltd|software|systems|technologies|group)\b', ''
-    # Remove version/build strings
     $cleanName = $cleanName -replace '\b(version|build|release|client|edition|player)\b', ''
-    # Cleanup extra spaces
     $cleanName = ($cleanName -replace '\s+', ' ').Trim()
 
-    # Create candidate ID by replacing remaining spaces with hyphens
     $candidateId = $cleanName -replace '\s+', '-'
     $candidateId = $candidateId -replace '[^a-z0-9\-\.]', '' # keep alphanumeric, hyphen, dot
     $candidateId = ($candidateId -replace '-+', '-').Trim('-')
 
-    # If normalized candidate is empty, return unidentified
     if ([string]::IsNullOrWhiteSpace($candidateId)) {
         return [PSCustomObject]@{
             ChocoId    = ""
             Confidence = "None"
-            Source     = "Heuristics"
+            Source     = "Search"
         }
     }
 
-    # Step 3: Run online search if requested and choco is installed
-    if ($OnlineSearch -and (Test-CommandExists "choco")) {
-        Write-Host "    [Search] Querying Chocolatey for '$candidateId'..." -ForegroundColor DarkGray
-        # Query choco search
-        # We query the candidateId. We specify -r (limit output) to get a clean comma-separated output
-        $searchResult = choco search $candidateId -r --exact -y 2>$null
-        if (-not [string]::IsNullOrWhiteSpace($searchResult)) {
-            # Exact match found on Chocolatey!
-            $chocoMatch = ($searchResult -split '\|')[0]
+    # Step 3: Run choco search if choco is installed
+    if (Test-CommandExists "choco") {
+        # 3.1 Exact search first
+        $exactResult = choco search $candidateId -r --exact -y 2>$null
+        if (-not [string]::IsNullOrWhiteSpace($exactResult)) {
+            $chocoMatch = ($exactResult -split '\|')[0].Trim()
             return [PSCustomObject]@{
                 ChocoId    = $chocoMatch
                 Confidence = "High"
-                Source     = "ChocoOnlineExact"
+                Source     = "ChocoExactSearch"
             }
-        } else {
-            # Try a broader search without --exact
-            $searchResultBroad = choco search $candidateId -r -y 2>$null
-            if (-not [string]::IsNullOrWhiteSpace($searchResultBroad)) {
-                # Take the first matched package ID
-                $firstMatch = ($searchResultBroad -split "`r`n" -split "`n" | Select-Object -First 1)
-                if (-not [string]::IsNullOrWhiteSpace($firstMatch)) {
-                    $chocoMatch = ($firstMatch -split '\|')[0]
-                    return [PSCustomObject]@{
-                        ChocoId    = $chocoMatch
-                        Confidence = "Medium"
-                        Source     = "ChocoOnlineBroad"
+        }
+
+        # 3.2 Broad search
+        $broadResults = choco search $candidateId -r -y 2>$null
+        if (-not [string]::IsNullOrWhiteSpace($broadResults)) {
+            $lines = $broadResults -split "`r`n" -split "`n"
+            foreach ($line in $lines) {
+                if (-not [string]::IsNullOrWhiteSpace($line)) {
+                    $parts = $line -split '\|'
+                    $pkgId = $parts[0].Trim()
+                    
+                    # Check if the returned package ID matches candidateId or is a close variant
+                    if ($pkgId -eq $candidateId -or 
+                        $pkgId -eq "$candidateId.install" -or 
+                        $pkgId -eq "$candidateId.portable" -or
+                        $pkgId -eq "$candidateId-app" -or
+                        $pkgId -eq "$candidateId-desktop" -or
+                        $candidateId -eq "$pkgId-desktop") {
+                        
+                        return [PSCustomObject]@{
+                            ChocoId    = $pkgId
+                            Confidence = "Medium"
+                            Source     = "ChocoBroadSearch"
+                        }
                     }
                 }
             }
         }
     }
 
-    # Step 4: Fallback to heuristics guestimate
-    # Let's set confidence to Medium if the cleanName is very simple, otherwise Low
-    $confidence = "Low"
-    if ($candidateId.Length -gt 3 -and $candidateId -notmatch '[\.\-]') {
-        $confidence = "Medium"
-    }
-
+    # Step 4: If no search results found, DO NOT GUESS.
+    # Return empty package ID so user can review and fill it manually if desired.
     return [PSCustomObject]@{
-        ChocoId    = $candidateId
-        Confidence = $confidence
-        Source     = "Heuristics"
+        ChocoId    = ""
+        Confidence = "None"
+        Source     = "Search"
     }
 }
 
@@ -254,7 +249,7 @@ function Export-MappingCsv {
         [Parameter(Mandatory=$true)]
         [string]$Path,
         
-        [switch]$OnlineSearch
+        [switch]$OnlineSearch # Retained as legacy flag, search is now always automated
     )
 
     $existingMappings = @{}
@@ -278,15 +273,18 @@ function Export-MappingCsv {
     $totalCount = $Apps.Count
     $currentIndex = 0
 
-    Write-Host "[*] Resolving Chocolatey packages (this may take a moment)..." -ForegroundColor Cyan
+    Write-Host "[*] Resolving Chocolatey packages via search (this may take a moment)..." -ForegroundColor Cyan
 
     foreach ($app in $Apps) {
         $currentIndex++
         $appNameLower = $app.AppName.ToLower().Trim()
-        
+        $idxStr = $currentIndex.ToString().PadLeft($totalCount.ToString().Length)
+        $prefix = "[$idxStr/$totalCount]"
+
         if ($existingMappings.ContainsKey($appNameLower)) {
             # Preserve existing mapping
             $exist = $existingMappings[$appNameLower]
+            Write-Host "$prefix [*] Preserved: '$($app.AppName)' -> '$($exist.ChocoPackageId)'" -ForegroundColor Gray
             $finalRows.Add([PSCustomObject]@{
                 ApplicationName = $app.AppName
                 Publisher       = $app.Publisher
@@ -296,13 +294,8 @@ function Export-MappingCsv {
                 Action          = $exist.Action
             })
         } else {
-            # Perform search / heuristic match
-            # Show a progress notice for online searches
-            if ($OnlineSearch) {
-                Write-Progress -Activity "Matching Apps" -Status "Searching '$($app.AppName)' ($currentIndex/$totalCount)" -PercentComplete (($currentIndex / $totalCount) * 100)
-            }
-
-            $match = Search-ChocoPackage -AppName $app.AppName -Publisher $app.Publisher -OnlineSearch:$OnlineSearch
+            # Perform exact/broad choco search mapping
+            $match = Search-ChocoPackage -AppName $app.AppName -Publisher $app.Publisher
 
             # Default action rules
             $action = "Review"
@@ -310,6 +303,17 @@ function Export-MappingCsv {
                 $action = "Include"
             } elseif ($match.Confidence -eq "None" -or [string]::IsNullOrWhiteSpace($match.ChocoId)) {
                 $action = "Ignore"
+            }
+
+            # Interactive logging based on match source
+            if ($match.Confidence -eq "High" -and $match.Source -eq "CommonMappings") {
+                Write-Host "$prefix [+] Common Map:  '$($app.AppName)' -> '$($match.ChocoId)'" -ForegroundColor Cyan
+            } elseif ($match.Confidence -eq "High" -and $match.Source -eq "ChocoExactSearch") {
+                Write-Host "$prefix [+] Exact Search: '$($app.AppName)' -> '$($match.ChocoId)'" -ForegroundColor Green
+            } elseif ($match.Confidence -eq "Medium" -and $match.Source -eq "ChocoBroadSearch") {
+                Write-Host "$prefix [+] Broad Search: '$($app.AppName)' -> '$($match.ChocoId)'" -ForegroundColor Yellow
+            } else {
+                Write-Host "$prefix [-] Unresolved:   '$($app.AppName)'" -ForegroundColor DarkGray
             }
 
             $finalRows.Add([PSCustomObject]@{
@@ -321,10 +325,6 @@ function Export-MappingCsv {
                 Action          = $action
             })
         }
-    }
-
-    if ($OnlineSearch) {
-        Write-Progress -Activity "Matching Apps" -Completed
     }
 
     # Ensure parent directory exists
