@@ -333,7 +333,18 @@ function Export-MappingCsv {
         New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
     }
 
-    $finalRows | Export-Csv -Path $Path -NoTypeInformation -Encoding UTF8 -Force
+    # Sort rows by Confidence: High first, then Medium, then Low, then None
+    $confidenceWeight = @{
+        "High"   = 1
+        "Medium" = 2
+        "Low"    = 3
+        "None"   = 4
+    }
+    $sortedRows = $finalRows | Sort-Object @{ Expression = { 
+        if ($confidenceWeight.ContainsKey($_.MatchConfidence)) { $confidenceWeight[$_.MatchConfidence] } else { 4 } 
+    } }
+
+    $sortedRows | Export-Csv -Path $Path -NoTypeInformation -Encoding UTF8 -Force
     Write-Host "[+] Mappings successfully saved to '$Path'." -ForegroundColor Green
     Write-Host "    Please open this file, review the matched package IDs, set Action to 'Include' or 'Ignore', and save." -ForegroundColor Yellow
 }
