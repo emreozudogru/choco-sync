@@ -1,0 +1,4 @@
+# ChocoAlign Gitignore
+choco-mappings.csv
+packages.config
+*.log
