@@ -8,10 +8,15 @@
 
 1. **Dual-Path Registry Scanning**: Scans both 64-bit and 32-bit (Wow6432Node) HKLM and HKCU registry pathways.
 2. **Filtered Scanning**: Automatically excludes system components, updates (KB files), language packs, and parent-sub-components to keep mappings clean.
-3. **Word-Boundary Heuristic Matching**: Uses regular expression word boundaries (`\b`) to match names accurately against static mappings without accidental substring false positives (e.g., preventing "digital" matching to "git").
-4. **Editable CSV Interface**: Saves candidate matches to a user-friendly `choco-mappings.csv` file, allowing you to manually verify, correct, or exclude (`Ignore`) packages.
-5. **Preserved User Modifications**: Remapping scans dynamically merge with existing CSV files, preserving your manual adjustments.
-6. **Chocolatey Integration**: Generates native `packages.config` files for direct ingestion via `choco install`.
+3. **Advanced Name Normalization**:
+   - Strips auxiliary parentheses/brackets and their contents (e.g. `(Current user)`, `(Preview)`, `(64-bit)`) to extract the core application name.
+   - Cleans complex version strings and build metadata suffixes (e.g. `0.4.14+4` or `-beta`).
+   - Removes bitness words like `64bit`, `32bit`, and standalone `64` or `32` architecture flags.
+4. **Word-Boundary Heuristic Matching**: Uses regular expression word boundaries (`\b`) to match names accurately against static mappings without accidental substring false positives (e.g., preventing "digital" matching to "git").
+5. **Smart Seed Mappings**: Integrates direct mappings for proprietary applications to correct community equivalents (e.g. `Microsoft Office Professional Plus 2019` -> `office2019proplus`, and `Intel® Driver & Support Assistant` -> `intel-dsa`). Explicit ignore rules are supported to block false positives (e.g., mapping `cursor` to ignore `cursorfx`).
+6. **Editable CSV Interface**: Saves candidate matches to a user-friendly `choco-mappings.csv` file, allowing you to manually verify, correct, or exclude (`Ignore`) packages.
+7. **Preserved User Modifications**: Remapping scans dynamically merge with existing CSV files, preserving your manual adjustments.
+8. **Chocolatey Integration**: Generates native `packages.config` files for direct ingestion via `choco install`.
 
 ---
 
